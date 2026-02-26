@@ -33,3 +33,4 @@ D:\Projects\SubtitleService\SubtitleService\src\SubtitleService\bin\Debug\net10.
 D:\Projects\SubtitleService\SubtitleService\src\SubtitleService\bin\Debug\net10.0\Swashbuckle.AspNetCore.SwaggerGen.dll
 D:\Projects\SubtitleService\SubtitleService\src\SubtitleService\bin\Debug\net10.0\Swashbuckle.AspNetCore.SwaggerUI.dll
 D:\Projects\SubtitleService\SubtitleService\src\SubtitleService\obj\Debug\net10.0\Subtitle.BBDAC964.Up2Date
+D:\Projects\SubtitleService\SubtitleService\src\SubtitleService\obj\Debug\net10.0\SubtitleService.sourcelink.json

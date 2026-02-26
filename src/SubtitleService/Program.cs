@@ -10,20 +10,18 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddSingleton<JobStatus>();
 builder.Services.AddSingleton<SubtitleExtractorService>();
 
-// Configurações do Swagger
+// Configurações do Swagger simplificadas
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
 var app = builder.Build();
 
-// Ativa o Swagger globalmente (mesmo fora do ambiente de desenvolvimento, útil para containers locais)
 app.UseSwagger();
 app.UseSwaggerUI(options =>
 {
     options.SwaggerEndpoint("/swagger/v1/swagger.json", "Extrator de Legendas v1");
-    options.RoutePrefix = "swagger"; // Acessível em /swagger
+    options.RoutePrefix = "swagger"; 
 });
-
 
 // ================= ENDPOINTS DA API =================
 
@@ -43,10 +41,7 @@ app.MapPost("/api/process", (ProcessRequest request, SubtitleExtractorService ex
     _ = Task.Run(() => extractor.ProcessDirectoryAsync(request.DirectoryPath));
 
     return Results.Accepted(value: new { message = "Processamento iniciado.", path = request.DirectoryPath });
-})
-.WithTags("Controle")
-.WithSummary("Inicia a varredura e extração")
-.WithDescription("Inicia o processamento em segundo plano no diretório especificado.");
+});
 
 app.MapGet("/api/status", (JobStatus status) =>
 {
@@ -65,17 +60,12 @@ app.MapGet("/api/status", (JobStatus status) =>
         errosEncontrados = status.Errors.Count,
         detalhesErros = status.Errors
     });
-})
-.WithTags("Monitoramento")
-.WithSummary("Consulta o status em tempo real")
-.WithDescription("Retorna um JSON com o progresso atual do serviço de extração.");
-
+});
 
 // ================= ENDPOINT DA INTERFACE WEB (UI) =================
 
 app.MapGet("/", () => Results.Content(ObterHtmlDashboard(), "text/html", Encoding.UTF8))
-.ExcludeFromDescription(); // Esconde esta rota do Swagger, pois é apenas HTML
-
+.ExcludeFromDescription(); 
 
 app.Run("http://0.0.0.0:8080");
 
@@ -238,7 +228,11 @@ public class SubtitleExtractorService
     private readonly JobStatus _status;
     private static readonly HttpClient _client = new();
 
-    private readonly string _subtitleEditPath = "/opt/subtitleedit";
+    // Detecção automática de OS para funcionar tanto nos testes (Windows) quanto no Docker (Linux)
+    private readonly string _subtitleEditPath = OperatingSystem.IsWindows() 
+        ? @"C:\VideoTools\SE4015FI\SubtitleEdit.exe" 
+        : "/opt/subtitleedit/SubtitleEdit";
+        
     private readonly string _mkvMergeExe = "mkvmerge";
     private readonly string _mkvExtractExe = "mkvextract";
     private readonly string _webhookUrl = "http://192.168.15.5:9876/api/webhook/sonarr";
@@ -290,17 +284,18 @@ public class SubtitleExtractorService
         }
     }
 
-    private async Task ProcessarArquivoAsync(string arquivoPath)
+private async Task ProcessarArquivoAsync(string arquivoPath)
     {
         string nomeArquivo = Path.GetFileName(arquivoPath);
         string diretorioArquivo = Path.GetDirectoryName(arquivoPath) ?? "";
         string nomeBaseSemExt = Path.GetFileNameWithoutExtension(arquivoPath);
         string nomeBaseLegenda = Path.Combine(diretorioArquivo, nomeBaseSemExt + ".en");
+        string caminhoFinalSrt = nomeBaseLegenda + ".srt";
 
         _status.CurrentAction = "Verificando legendas existentes...";
 
-        var extensoesChecagem = new[] { ".srt", ".ass", ".ssa", ".sup", ".sub" };
-        if (extensoesChecagem.Any(ext => File.Exists(nomeBaseLegenda + ext)))
+        // 1. Se o arquivo final (.srt) já existe, assumimos que já está pronto e pulamos tudo.
+        if (File.Exists(caminhoFinalSrt))
         {
             _status.CurrentFileProgress = 100;
             return;
@@ -308,58 +303,103 @@ public class SubtitleExtractorService
 
         try
         {
-            _status.CurrentAction = "Lendo metadados do arquivo...";
-            string? jsonOutput = RunProcessForOutput(_mkvMergeExe, $"-J \"{arquivoPath}\"");
-            if (string.IsNullOrEmpty(jsonOutput)) return;
+            string caminhoExtraido = "";
+            string ext = "";
+            bool precisaExtrair = true;
 
-            var jsonOptions = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
-            var mkvInfo = JsonSerializer.Deserialize<MkvData>(jsonOutput, jsonOptions);
-
-            var legendasValidas = mkvInfo?.tracks?.Where(t => 
-                t.type == "subtitles" &&
-                (t.properties?.language == "eng" || (t.properties?.language_ietf != null && t.properties.language_ietf.Contains("en"))) &&
-                !Regex.IsMatch(t.properties?.track_name ?? "", "Signs|Songs", RegexOptions.IgnoreCase)
-            ).ToList();
-
-            if (legendasValidas == null || legendasValidas.Count == 0) return;
-
-            var legendaAlvo = legendasValidas.OrderBy(t => 
+            // 2. Verifica se há arquivos brutos (.ass, .sup, .sub) precisando de conversão/limpeza
+            var extensoesParaConverter = new[] { ".ass", ".ssa", ".sup", ".sub" };
+            foreach (var extCheck in extensoesParaConverter)
             {
-                if (t.properties?.codec_id == "S_TEXT/UTF8") return 1;
-                if (t.properties?.codec_id == "S_VOBSUB")    return 2;
-                return 3;
-            }).First();
+                if (File.Exists(nomeBaseLegenda + extCheck))
+                {
+                    caminhoExtraido = nomeBaseLegenda + extCheck;
+                    ext = extCheck;
+                    precisaExtrair = false; // Como o arquivo já existe, não precisamos extrair do MKV novamente
+                    break;
+                }
+            }
 
-            long id = legendaAlvo.id;
-            string codec = legendaAlvo.properties?.codec_id ?? "";
-            string ext = GetExtensionFromCodec(codec);
-            string caminhoExtraido = nomeBaseLegenda + ext;
-            string caminhoFinalSrt = nomeBaseLegenda + ".srt";
+            // 3. Só extrai do MKV se não existir nenhum arquivo anterior
+            if (precisaExtrair)
+            {
+                _status.CurrentAction = "Lendo metadados do arquivo...";
+                string? jsonOutput = RunProcessForOutput(_mkvMergeExe, $"-J \"{arquivoPath}\"");
+                if (string.IsNullOrEmpty(jsonOutput)) return;
 
-            _status.CurrentAction = $"Extraindo legenda em formato {ext}...";
-            RunProcessWithProgress(_mkvExtractExe, $"tracks \"{arquivoPath}\" {id}:\"{caminhoExtraido}\"");
+                var jsonOptions = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+                var mkvInfo = JsonSerializer.Deserialize<MkvData>(jsonOutput, jsonOptions);
+
+                var legendasValidas = mkvInfo?.tracks?.Where(t => 
+                    t.type == "subtitles" &&
+                    (t.properties?.language == "eng" || (t.properties?.language_ietf != null && t.properties.language_ietf.Contains("en"))) &&
+                    !Regex.IsMatch(t.properties?.track_name ?? "", "Signs|Songs", RegexOptions.IgnoreCase)
+                ).ToList();
+
+                if (legendasValidas == null || legendasValidas.Count == 0) return;
+
+                var legendaAlvo = legendasValidas.OrderBy(t => 
+                {
+                    if (t.properties?.codec_id == "S_TEXT/UTF8") return 1;
+                    if (t.properties?.codec_id == "S_VOBSUB")    return 2;
+                    return 3;
+                }).First();
+
+                long id = legendaAlvo.id;
+                string codec = legendaAlvo.properties?.codec_id ?? "";
+                ext = GetExtensionFromCodec(codec);
+                caminhoExtraido = nomeBaseLegenda + ext;
+
+                _status.CurrentAction = $"Extraindo legenda em formato {ext}...";
+                RunProcessWithProgress(_mkvExtractExe, $"tracks \"{arquivoPath}\" {id}:\"{caminhoExtraido}\"");
+            }
 
             string arquivoParaWebhook = caminhoExtraido;
 
-            if (ext == ".sup" || ext == ".ass" || ext == ".sub")
+            // ================= CONVERSÃO E LIMPEZA DE TAGS =================
+            if (ext == ".sup" || ext == ".ass" || ext == ".sub" || ext == ".ssa")
             {
-                _status.CurrentAction = (ext == ".sup" || ext == ".sub") ? "Realizando OCR (Isso pode demorar)..." : "Convertendo para SRT...";
+                _status.CurrentAction = (ext == ".sup" || ext == ".sub") ? $"Realizando OCR do {ext} (Isso pode demorar)..." : $"Convertendo e limpando {ext}...";
                 _status.IsIndeterminate = true; 
                 
                 if (File.Exists(_subtitleEditPath))
                 {
-                    string argsConvert = $"/convert \"{caminhoExtraido}\" srt"; // /suppressmsgboxes
-                    int exitCode = RunProcessWait(_subtitleEditPath, argsConvert);
+                    string argsConvert = $"/convert \"{caminhoExtraido}\" srt /removeformatting";// /suppressmsgboxes
+                    var result = RunProcessWaitCapture(_subtitleEditPath, argsConvert);
 
-                    if (exitCode == 0 && File.Exists(caminhoFinalSrt))
+                    if (result.ExitCode == 0 && File.Exists(caminhoFinalSrt))
                     {
+                        // Exclui o arquivo original (recém extraído ou o que já estava lá)
                         try { File.Delete(caminhoExtraido); } catch { }
                         if (ext == ".sub") { try { File.Delete(nomeBaseLegenda + ".idx"); } catch { } }
+                        
                         arquivoParaWebhook = caminhoFinalSrt;
                     }
                     else
                     {
-                        _status.Errors.Add($"Falha no OCR/Conversão: {nomeArquivo}");
+                        string erroMsg = string.IsNullOrWhiteSpace(result.ErrorOutput) ? "Verifique os logs." : result.ErrorOutput;
+                        _status.Errors.Add($"Falha na Conversão/OCR de {nomeArquivo}. Erro: {erroMsg}");
+                    }
+                }
+                else
+                {
+                    _status.Errors.Add($"Subtitle Edit não encontrado em: {_subtitleEditPath}");
+                }
+            }
+            else if (ext == ".srt")
+            {
+                // Se a legenda extraída foi um SRT nativo, aplicamos apenas a limpeza de tags
+                if (File.Exists(_subtitleEditPath))
+                {
+                    _status.CurrentAction = "Limpando tags de formatação do SRT...";
+                    _status.IsIndeterminate = true;
+                    
+                    string argsClean = $"/convert \"{caminhoExtraido}\" srt /removeformatting /overwrite"; // /suppressmsgboxes
+                    var result = RunProcessWaitCapture(_subtitleEditPath, argsClean);
+
+                    if (result.ExitCode != 0)
+                    {
+                         _status.Errors.Add($"Falha ao limpar SRT de {nomeArquivo}. Erro: {result.ErrorOutput}");
                     }
                 }
             }
@@ -402,7 +442,8 @@ public class SubtitleExtractorService
         catch { return null; }
     }
 
-    private int RunProcessWait(string filename, string arguments)
+    // Método aprimorado para capturar o Erro (StandardError) do processo
+    private (int ExitCode, string ErrorOutput) RunProcessWaitCapture(string filename, string arguments)
     {
         try
         {
@@ -410,11 +451,18 @@ public class SubtitleExtractorService
             p.StartInfo.FileName = filename;
             p.StartInfo.Arguments = arguments;
             p.StartInfo.UseShellExecute = false;
+            p.StartInfo.RedirectStandardError = true; // Captura falhas silenciosas
+            p.StartInfo.CreateNoWindow = true;
             p.Start();
+            
+            string error = p.StandardError.ReadToEnd();
             p.WaitForExit();
-            return p.ExitCode;
+            return (p.ExitCode, error.Trim());
         }
-        catch { return -1; }
+        catch (Exception ex)
+        {
+            return (-1, ex.Message);
+        }
     }
 
     private int RunProcessWithProgress(string filename, string arguments)
