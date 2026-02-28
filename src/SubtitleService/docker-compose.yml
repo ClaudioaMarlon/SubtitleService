@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  subtitle-extractor:
+    build: .
+    container_name: subtitle-extractor-api
+    ports:
+      - "8080:8080"
+    volumes:
+      # LADO ESQUERDO (Seu Servidor) : LADO DIREITO (Container)
+      # Altere "/caminho/real/dos/seus/videos" para a pasta onde seus MKVs ficam armazenados.
+      - z:\\:/videos
+    environment:
+      # Configuração de fuso horário para manter a precisão dos logs e timestamps do webhook
+      - TZ=America/Sao_Paulo
+      - ASPNETCORE_ENVIRONMENT=Production
+    restart: unless-stopped
